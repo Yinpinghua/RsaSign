@@ -2,8 +2,21 @@
 #define rsa_sign_h__
 
 #include "base64.hpp"
-#include "common.hpp"
-#include "unit.hpp"
+#include <boost/beast/ssl.hpp>
+#include <vector>
+#include <string>
+#include <fstream>
+#include <iostream>
+
+void split(std::vector<std::string>& result, const std::string& str, std::string demli) {
+	std::string copy_str = str;
+	char* ptr = strtok((char*)copy_str.c_str(), demli.c_str());
+	while (ptr != nullptr) {
+		result.push_back(std::move(ptr));
+		ptr = strtok(nullptr, demli.c_str());
+	}
+}
+
 
 class rsa_sign {
 public:
@@ -41,7 +54,7 @@ public:
 		}
 
 		std::vector<std::string>res;
-		unit::split(res, copy_data, "\n");
+		split(res, copy_data, "\n");
 
 		data.clear();
 		auto iter_begin = res.begin();
