@@ -1,0 +1,178 @@
+		bool init_cfg(std::string&& url,const std::string & auth_key_path,const std::string & sub_key_id){
+			std::vector<std::string>result;
+			std::string body_str;
+			int http_code = 0;
+			unit::get_url_args(url, result, http_code);
+			std::string url_info = result[2];
+			std::string host = result[0];
+			std::string port = result[1];
+			std::string host_str = host + ":" + port;
+
+			if (result.size() < 2) {
+				std::cout << "init_cfg error" << std::endl;
+				LOG_CRIT << "init_cfg error";
+				return false;
+			}
+
+			http_client client(boost::beast::http::verb::get, url);
+			std::string current_time = unit::get_current_utc_time("%FT%TZ");
+			std::string copy_time = current_time;
+			std::string auth_str_prefix  = "v1-auth";
+			auth_str_prefix .append("/");
+			auth_str_prefix .append(current_time);
+			auth_str_prefix .append("/");
+			auth_str_prefix .append(sub_key_id);
+			auth_str_prefix .append("/");
+			auth_str_prefix .append(std::to_string(auth_seconds_));
+			std::string private_key = rsa_sign::instance().get_private_key();
+			std::string signing_key = rsa_sign::instance().sha256_hmac_hex(private_key,auth_str_prefix);
+			if (signing_key.empty()){
+				LOG_CRIT << "init_cfg error";
+				return false;
+			}
+
+			std::string canonical_header = "host";
+			canonical_header.append(":");
+			canonical_header.append(host_str);
+			canonical_header.append("\n");
+			canonical_header.append("v1-request-date");
+			canonical_header.append(":");
+			canonical_header.append(current_time);
+
+			std::string canonical_req="GET";
+			canonical_req.append("\n");
+			canonical_req.append(url_info);	// canonicalURI 
+			canonical_req.append("\n");
+			canonical_req.append("");  //canonicalParameters 
+			canonical_req.append("\n");
+			canonical_req.append("");  //canonicalRequestBody  
+			canonical_req.append("\n");
+			canonical_req.append(canonical_header);	//canonicalHeader
+
+			std::string signature =rsa_sign::instance().sha256_hmac_hex(signing_key, canonical_req);
+			if (signature.empty()) {
+				LOG_CRIT << "init_cfg error";
+				return false;
+			}
+
+			std::string signed_headers;//加签的头
+			signed_headers.append("Host");
+			signed_headers.append(";");
+			signed_headers.append("v1-request-date");
+
+			std::string auth_value;
+			auth_value.append(auth_str_prefix);
+			auth_value.append("/");
+			auth_value.append(signed_headers);
+			auth_value.append("/");
+			auth_value.append(signature);
+
+			std::string copy_auth_value = auth_value;
+			copy_auth_value = rsa_sign::instance().data_sign(auth_value);
+
+			client.add_header("Host",std::move(host_str));
+			client.add_header("Authorization", std::move(auth_value));
+			client.add_header("v1-request-date",std::move(copy_time));
+			client.add_header("v1-request-sign", std::move(copy_auth_value));
+			//client.add_header("v1-request-debugger",true);
+			//client.add_header("v1-request-test-check-close", "true");
+			if (!client.connect(std::move(host), std::atoi(port.c_str()))) {
+				std::cout << "link web server error" << std::endl;
+				LOG_CRIT << "link web server error";
+				return false;
+			}
+
+			if (!client.send()) {
+				std::cout << "link web server error" << std::endl;
+				LOG_CRIT << "link web server error";
+				return false;
+			}
+			if (!client.receive_msg()) {
+				std::cout << "link web server error" << std::endl;
+				LOG_CRIT << "link web server error";
+				return false;
+			}
+			int ret = client.get_result_int();
+			if (ret != (int)boost::beast::http::status::ok) {
+				std::cout << "http get_result error:" << ret << std::endl;
+				LOG_CRIT << "http get_result error:" << ret;
+				return false;
+			}
+
+			try {
+				nlohmann::json js_str = nlohmann::json::parse(client.get_body());
+				int status = js_str.value("status", -1);
+				if (status != static_cast<int>(boost::beast::http::status::ok)) {
+					LOG_CRIT << "status not eq 200:" << status;
+					return false;
+				}
+
+				std::string encrypt = client.get_header_value("v1-response-encrypt");
+				bool flag = (encrypt == "true") ? true:false;
+				std::string  decrypt_data;
+				nlohmann::json sub_js_str;
+				std::string encrypt_data = js_str.value("data","");
+				if (encrypt_data.empty()){
+					return false;
+				}
+
+				if (flag){
+					decrypt_data = rsa_sign::instance().decrypt_data(encrypt_data);
+				}else {
+					sub_js_str = nlohmann::json::parse(encrypt_data);
+				}
+
+				sub_js_str= nlohmann::json::parse(decrypt_data);
+				nlohmann::json::const_iterator sub_iter_beign = sub_js_str.begin();
+				for (;sub_iter_beign != sub_js_str.end();++sub_iter_beign) {
+					std::string key = sub_iter_beign.key();
+					if (unit::is_valid_utf8(sub_iter_beign.key().c_str())) {
+						key = boost::locale::conv::between(sub_iter_beign.key(), "GBK", "UTF-8");
+					}
+
+					std::vector<std::string> vec;
+					nlohmann::json sub_sub_js_array;
+					sub_sub_js_array = sub_js_str.value(sub_iter_beign.key(), std::move(sub_sub_js_array));
+					if (sub_sub_js_array.size() > 0) {
+						for (auto arry_str : sub_sub_js_array) {
+							std::string value = arry_str.get<std::string>();
+							if (unit::is_valid_utf8(value.c_str())) {
+								value = boost::locale::conv::between(value, "GBK", "UTF-8");
+							}
+
+							vec.push_back(std::move(value));
+						}
+					}
+					else {
+						vec.emplace_back(" ");
+					}
+
+					map_areas_.emplace(key, std::move(vec));
+				}
+
+				std::cout << "\r\nArea Group ========\r\n";
+				for (auto& v : map_areas_) {
+					std::cout << v.first;
+
+					bool bs = true;
+					for (auto& vv : v.second) {
+						if (bs) {
+							if (v.first.length() > 6)
+								std::cout << "----" << vv;
+							else
+								std::cout << "\t----" << vv;
+							bs = false;
+						}
+						else {
+							std::cout << ", " << vv;
+						}
+					}
+					std::cout << std::endl;
+				}
+			}catch (std::exception & e){
+				LOG_CRIT << "group err :" << e.what();
+				return false;
+			}
+
+			return true;
+		}
